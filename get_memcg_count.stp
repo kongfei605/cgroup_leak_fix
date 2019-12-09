@@ -1,0 +1,49 @@
+# usage : stap -g get_memcg_count.stp
+
+%{
+
+#include <linux/rcupdate.h>
+#include <linux/cgroup.h>
+#include <linux/memcontrol.h>
+
+
+	/* The embedded c function must have a return value.
+	 *  If it doesn't has an argument, we must use a specified void here.
+	 */
+        int get_memcg_count(void)
+        {
+                struct cgroup_subsys_state *tmp;
+                int count = 1;
+		int i;
+
+                rcu_read_lock();
+                for (i = 1; i < 65536; i++) {
+                        tmp = css_lookup(&mem_cgroup_subsys, i);
+                        if (tmp)
+                                count++;
+
+                }
+                rcu_read_unlock();
+
+		return count;
+        }
+
+%}
+
+
+function do_calc:long()
+%{
+	int count = 0;
+	count = get_memcg_count();
+	STAP_RETVALUE = count;
+%}
+
+probe begin {
+	printf("probe begin\n");
+	printf("count %ld\n", do_calc());
+	exit();
+}
+
+probe end {
+	printf("probe end\n");
+}
