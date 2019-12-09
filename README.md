@@ -1,7 +1,9 @@
-=======
-前提 kubelet已经关闭kmem accounting
+README
+=================
 
-###
+前提:kubelet已经关闭kmem accounting
+
+### build
 sh build.sh 会生成可执行文件cgroup_fix
 
 ### cgroup_fix执行的动作
