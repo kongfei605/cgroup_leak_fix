@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const (
@@ -20,9 +21,8 @@ done`
 )
 
 var (
-
-	originPath         = memcgRoot + "/kubepods"
-	transPath          = memcgRoot + "/kubepods2"
+	originPath = memcgRoot + "/kubepods"
+	transPath  = memcgRoot + "/kubepods2"
 )
 
 type (
@@ -42,7 +42,6 @@ func execCommand(cmd string) (string, error) {
 	return "", nil
 }
 
-
 func checkSlabInfo(dir string) bool {
 	cmdStr := fmt.Sprintf("cat %s/memory.kmem.slabinfo", dir)
 	cmd := exec.Command("/bin/bash", "-c", cmdStr)
@@ -57,9 +56,9 @@ func checkSlabInfo(dir string) bool {
 	return true
 }
 
-func openCgroupMigration(dir string) (string, error){
+func openCgroupMigration(dir string) (string, error) {
 	cmd := fmt.Sprintf(cgroupMigrationCmd, dir)
-	return  execCommand(cmd)
+	return execCommand(cmd)
 }
 
 // 目录结构转成二叉树
@@ -98,7 +97,7 @@ func copyConf(src, dst string) error {
 	conf, err := os.Open(src)
 	if err != nil {
 		log.Printf("open file %s err:%s", src, err)
-		return  err
+		return err
 	}
 	defer conf.Close()
 	br := bufio.NewReader(conf)
@@ -112,13 +111,15 @@ func copyConf(src, dst string) error {
 		cmd := exec.Command("/bin/bash", "-c", cmdStr)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			msg:= fmt.Errorf("failed to copy file from %s to %s with %s, output:%s", src, dst, err, string(output))
-			return msg
+			if strings.Contains(string(output), "No such process") {
+				continue
+			}
+			return fmt.Errorf("failed to copy file from %s to %s with %s, output:%s",
+				src, dst, err, string(output))
 		}
 	}
 	return nil
 }
-
 
 func inorderTraverse(root *Node, src, dst string) {
 	if root == nil {
@@ -135,7 +136,7 @@ func inorderTraverse(root *Node, src, dst string) {
 			n = e.sibling
 			// copy conf && copy container && copy proc
 			dir := e.value.(string)
-			fmt.Println(dir)
+			fmt.Println("current group:", dir)
 			dstDir := strings.Replace(dir, src, dst, -1)
 			if _, err := os.Stat(dstDir); os.IsNotExist(err) {
 				fmt.Printf("mkdir %s \n", dstDir)
@@ -146,10 +147,10 @@ func inorderTraverse(root *Node, src, dst string) {
 				}
 			}
 			// cgroup migration feature
-			cmd := fmt.Sprintf("echo 1 > %s", dstDir + "/memory.move_charge_at_immigrate")
-			output, err:= execCommand(cmd)
-			if err !=nil {
-				log.Printf("%s error %s with output\n", cmd , err, output)
+			cmd := fmt.Sprintf("echo 1 > %s", dstDir+"/memory.move_charge_at_immigrate")
+			output, err := execCommand(cmd)
+			if err != nil {
+				log.Printf("%s error %s with output\n", cmd, err, output)
 				continue
 			}
 
@@ -160,38 +161,41 @@ func inorderTraverse(root *Node, src, dst string) {
 			}
 
 			for _, file := range files {
-				if strings.HasSuffix(file, "memory.limit_in_bytes") {
+				if strings.HasSuffix(file, "memory.limit_in_bytes") ||
+					strings.HasSuffix(file, "cgroup.procs") {
 					dstFile := strings.Replace(file, src, dst, -1)
-					err = copyConf(file, dstFile)
-					if err !=nil {
+					for retry := 0; retry < 3; retry++ {
+						err = copyConf(file, dstFile)
+						if err == nil {
+							break
+						}
 						log.Println(err)
-						break
-					}
-				}
-
-				if strings.HasSuffix(file, "cgroup.procs") {
-					dstFile := strings.Replace(file, src, dst, -1)
-					err = copyConf(file, dstFile)
-					if err != nil {
-						log.Println(err)
-						break
 					}
 				}
 			}
+
 			if len(dirs) == 0 {
-				// drop page cache
-				cmd := fmt.Sprintf("echo 0 > %s/memory.force_empty", dir)
-				output, err:= execCommand(cmd)
-				if err !=nil {
+				for retry := 0; retry < 3; retry++ {
+					// drop page cache
+					cmd := fmt.Sprintf("echo 0 > %s/memory.force_empty", dir)
+					output, err := execCommand(cmd)
+					if err == nil {
+						break
+					}
 					log.Printf("drop cache  cmd: %s err:%s with output:%s\n", cmd, err, output)
+					time.Sleep(100 * time.Millisecond)
 				}
 
-				// clean cgroup
-				fmt.Printf("rmdir %s\n", dir)
-				cmd = fmt.Sprintf("rmdir %s", dir)
-				output, err = execCommand(cmd)
-				if err != nil {
+				for retry := 0; retry < 3; retry++ {
+					// clean cgroup
+					fmt.Printf("rmdir %s\n", dir)
+					cmd = fmt.Sprintf("rmdir %s", dir)
+					output, err = execCommand(cmd)
+					if err == nil {
+						break
+					}
 					log.Printf("rmdir %s err:%s with output:%s\n", dir, err, output)
+					time.Sleep(100 * time.Millisecond)
 				}
 			}
 		}
@@ -233,7 +237,6 @@ func main() {
 		return
 	}
 
-
 	// stop kubelet
 	output, err := execCommand("systemctl stop kubelet")
 	if err != nil {
@@ -248,8 +251,8 @@ func main() {
 	// copy limit_in_bytes && cgroup.procs
 	inorderTraverse(root, originPath, transPath)
 
-	back, err:= buildTree(transPath)
-	if err!=nil {
+	back, err := buildTree(transPath)
+	if err != nil {
 		log.Printf("build tree for %s err %s\n", transPath, err)
 		return
 	}
