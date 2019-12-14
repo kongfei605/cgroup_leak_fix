@@ -33,6 +33,19 @@ type (
 	}
 )
 
+func execCommandWithRetry(cmd string, retry, sleep int) (output string, err error) {
+	for i := 0; i < retry; i++ {
+		output, err = execCommand(cmd)
+		if err == nil {
+			return "", nil
+		}
+		if sleep > 0 {
+			time.Sleep(time.Duration(sleep) * time.Millisecond)
+		}
+	}
+	return output, err
+}
+
 func execCommand(cmd string) (string, error) {
 	c := exec.Command("/bin/sh", "-c", cmd)
 	output, err := c.CombinedOutput()
@@ -106,7 +119,6 @@ func copyConf(src, dst string) error {
 		if c == io.EOF {
 			break
 		}
-		// dstFile := strings.Replace(file, src, dst, -1)
 		cmdStr := fmt.Sprintf("echo %s >> %s", value, dst)
 		cmd := exec.Command("/bin/bash", "-c", cmdStr)
 		output, err := cmd.CombinedOutput()
@@ -114,8 +126,8 @@ func copyConf(src, dst string) error {
 			if strings.Contains(string(output), "No such process") {
 				continue
 			}
-			return fmt.Errorf("failed to copy file from %s to %s with %s, output:%s",
-				src, dst, err, string(output))
+			return fmt.Errorf(
+				"failed to copy file from %s to %s with %s, output:%s", src, dst, err, string(output))
 		}
 	}
 	return nil
@@ -175,27 +187,19 @@ func inorderTraverse(root *Node, src, dst string) {
 			}
 
 			if len(dirs) == 0 {
-				for retry := 0; retry < 3; retry++ {
-					// drop page cache
-					cmd := fmt.Sprintf("echo 0 > %s/memory.force_empty", dir)
-					output, err := execCommand(cmd)
-					if err == nil {
-						break
-					}
+				// drop page cache
+				cmd := fmt.Sprintf("echo 0 > %s/memory.force_empty", dir)
+				output, err := execCommandWithRetry(cmd, 3, 100)
+				if err != nil {
 					log.Printf("drop cache  cmd: %s err:%s with output:%s\n", cmd, err, output)
-					time.Sleep(100 * time.Millisecond)
 				}
 
-				for retry := 0; retry < 3; retry++ {
-					// clean cgroup
-					fmt.Printf("rmdir %s\n", dir)
-					cmd = fmt.Sprintf("rmdir %s", dir)
-					output, err = execCommand(cmd)
-					if err == nil {
-						break
-					}
+				// clean cgroup
+				fmt.Printf("rmdir %s\n", dir)
+				cmd = fmt.Sprintf("rmdir %s", dir)
+				output, err = execCommandWithRetry(cmd, 3, 100)
+				if err != nil {
 					log.Printf("rmdir %s err:%s with output:%s\n", dir, err, output)
-					time.Sleep(100 * time.Millisecond)
 				}
 			}
 		}
