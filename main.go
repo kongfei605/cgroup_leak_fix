@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -21,8 +22,8 @@ done`
 )
 
 var (
-	originPath = memcgRoot + "/kubepods"
-	transPath  = memcgRoot + "/kubepods2"
+	originPath = filepath.Join(memcgRoot, "kubepods")
+	transPath  = filepath.Join(memcgRoot, "kubepods2")
 )
 
 type (
@@ -159,7 +160,7 @@ func inorderTraverse(root *Node, src, dst string) {
 				}
 			}
 			// cgroup migration feature
-			cmd := fmt.Sprintf("echo 1 > %s", dstDir+"/memory.move_charge_at_immigrate")
+			cmd := fmt.Sprintf("echo 1 > %s", filepath.Join(dstDir, "memory.move_charge_at_immigrate"))
 			output, err := execCommand(cmd)
 			if err != nil {
 				log.Printf("%s error %s with output\n", cmd, err, output)
@@ -215,13 +216,15 @@ func walk(root string) (dirs, files []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	var objpath string
 	dirs = make([]string, 0, len(all))
 	files = make([]string, 0, len(all))
 	for _, obj := range all {
+		objpath = filepath.Join(root, obj.Name())
 		if obj.IsDir() {
-			dirs = append(dirs, root+"/"+obj.Name())
+			dirs = append(dirs, objpath)
 		} else {
-			files = append(files, root+"/"+obj.Name())
+			files = append(files, objpath)
 		}
 	}
 	return dirs, files, nil
