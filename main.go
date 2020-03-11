@@ -3,11 +3,11 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -21,8 +21,8 @@ done`
 )
 
 var (
-	originPath = memcgRoot + "/kubepods"
-	transPath  = memcgRoot + "/kubepods2"
+	originPath = filepath.Join(memcgRoot, "kubepods")
+	transPath  = filepath.Join(memcgRoot, "kubepods2")
 )
 
 type (
@@ -106,29 +106,74 @@ func buildTree(path string) (*Node, error) {
 	return root, nil
 }
 
-func copyConf(src, dst string) error {
+func read(src string) ([]string, error) {
 	conf, err := os.Open(src)
 	if err != nil {
-		log.Printf("open file %s err:%s", src, err)
-		return err
+		log.Printf("open file %s error %s", src, err)
+		return nil, err
 	}
 	defer conf.Close()
-	br := bufio.NewReader(conf)
-	for {
-		value, _, c := br.ReadLine()
-		if c == io.EOF {
-			break
+
+	var (
+		s   = bufio.NewScanner(conf)
+		out = []string{}
+	)
+
+	for s.Scan() {
+		if t := s.Text(); t != "" {
+			out = append(out, t)
 		}
-		cmdStr := fmt.Sprintf("echo %s >> %s", value, dst)
-		cmd := exec.Command("/bin/bash", "-c", cmdStr)
-		output, err := cmd.CombinedOutput()
+	}
+	return out, nil
+}
+
+func writeProc(dst string, data []string) error {
+	for _, line := range data {
+		if strings.HasPrefix(line, "-") {
+			continue
+		}
+		err := writeLine(dst, line)
+		if err == nil || strings.Contains(strings.ToLower(err.Error()), "no such process") {
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
+func writeLine(dst, line string) error {
+	if err := ioutil.WriteFile(dst, []byte(line), 0644); err != nil {
+		return fmt.Errorf("failed to write %v to %v: %v", line, dst, err)
+	}
+	return nil
+}
+
+func copyProc(src, dst string) error {
+	var (
+		out []string
+		err error
+	)
+	for i := 0; i < 3; i++ {
+		out, err = read(src)
 		if err != nil {
-			if strings.Contains(string(output), "No such process") {
-				continue
-			}
-			return fmt.Errorf(
-				"failed to copy file from %s to %s with %s, output:%s", src, dst, err, string(output))
+			continue
 		}
+		if len(out) == 0 {
+			return nil
+		}
+		err = writeProc(dst, out)
+	}
+
+	return err
+}
+
+func copyConf(src, dst string) error {
+	cmdStr := fmt.Sprintf("cat %s > %s", src, dst)
+	cmd := exec.Command("/bin/bash", "-c", cmdStr)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf(
+			"failed to copy file from %s to %s with %s, output:%s", src, dst, err, string(output))
 	}
 	return nil
 }
@@ -159,29 +204,37 @@ func inorderTraverse(root *Node, src, dst string) {
 				}
 			}
 			// cgroup migration feature
-			cmd := fmt.Sprintf("echo 1 > %s", dstDir+"/memory.move_charge_at_immigrate")
+			cmd := fmt.Sprintf("echo 1 > %s", filepath.Join(dstDir, "memory.move_charge_at_immigrate"))
 			output, err := execCommand(cmd)
 			if err != nil {
-				log.Printf("%s error %s with output\n", cmd, err, output)
+				log.Printf("%s error %s with output %s \n", cmd, err, output)
 				continue
 			}
 
 			dirs, files, err := walk(dir)
 			if err != nil {
-				log.Println(err)
+				log.Println("error ", err)
 				continue
 			}
 
 			for _, file := range files {
-				if strings.HasSuffix(file, "memory.limit_in_bytes") ||
-					strings.HasSuffix(file, "cgroup.procs") {
-					dstFile := strings.Replace(file, src, dst, -1)
+				dstFile := strings.Replace(file, src, dst, -1)
+				if strings.HasSuffix(file, "memory.limit_in_bytes") {
 					for retry := 0; retry < 3; retry++ {
 						err = copyConf(file, dstFile)
 						if err == nil {
 							break
 						}
-						log.Println(err)
+						log.Println("error ", err)
+					}
+				}
+				if strings.HasSuffix(file, "cgroup.procs") {
+					for retry := 0; retry < 3; retry++ {
+						err = copyProc(file, dstFile)
+						if err == nil {
+							break
+						}
+						log.Println("error ", err)
 					}
 				}
 			}
@@ -189,17 +242,17 @@ func inorderTraverse(root *Node, src, dst string) {
 			if len(dirs) == 0 {
 				// drop page cache
 				cmd := fmt.Sprintf("echo 0 > %s/memory.force_empty", dir)
-				output, err := execCommandWithRetry(cmd, 3, 100)
+				output, err := execCommandWithRetry(cmd, 3, 500)
 				if err != nil {
-					log.Printf("drop cache  cmd: %s err:%s with output:%s\n", cmd, err, output)
+					log.Printf("drop cache  cmd: %s error %s with output:%s\n", cmd, err, output)
 				}
 
 				// clean cgroup
 				fmt.Printf("rmdir %s\n", dir)
 				cmd = fmt.Sprintf("rmdir %s", dir)
-				output, err = execCommandWithRetry(cmd, 3, 100)
+				output, err = execCommandWithRetry(cmd, 3, 500)
 				if err != nil {
-					log.Printf("rmdir %s err:%s with output:%s\n", dir, err, output)
+					log.Printf("rmdir %s error %s with output:%s\n", dir, err, output)
 				}
 			}
 		}
@@ -215,13 +268,15 @@ func walk(root string) (dirs, files []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	var objpath string
 	dirs = make([]string, 0, len(all))
 	files = make([]string, 0, len(all))
 	for _, obj := range all {
+		objpath = filepath.Join(root, obj.Name())
 		if obj.IsDir() {
-			dirs = append(dirs, root+"/"+obj.Name())
+			dirs = append(dirs, objpath)
 		} else {
-			files = append(files, root+"/"+obj.Name())
+			files = append(files, objpath)
 		}
 	}
 	return dirs, files, nil
@@ -237,7 +292,7 @@ func main() {
 
 	root, err := buildTree(originPath)
 	if err != nil {
-		log.Printf("build tree for %s err %s\n", originPath, err)
+		log.Printf("build tree for %s error %s\n", originPath, err)
 		return
 	}
 
@@ -257,7 +312,7 @@ func main() {
 
 	back, err := buildTree(transPath)
 	if err != nil {
-		log.Printf("build tree for %s err %s\n", transPath, err)
+		log.Printf("build tree for %s error %s\n", transPath, err)
 		return
 	}
 
